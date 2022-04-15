@@ -6,8 +6,8 @@ use crate::{
 use unicode_xid::UnicodeXID;
 
 #[derive(Debug, Clone)]
-struct Lexer {
-    source: Vec<char>,
+pub struct Lexer {
+    pub source: Vec<char>,
 
     start: usize,
     current: usize,
@@ -66,15 +66,56 @@ impl Lexer {
         }
     }
 
-    fn lex_string(&mut self) -> Result<Token, Error> {
+    fn lex_string(&mut self, quote: char) -> Result<Token, Error> {
         self.start += 1; // skip the initial '"' in our token span
 
-        while !self.at_end() && self.peek()? != '"' {
+        while !self.at_end() && self.peek()? != quote {
             if self.peek()? == '\n' {
                 return Err(Error {
                     message: "strings must be on a single line".into(),
                     span: self.get_span(),
                 });
+            }
+
+            if self.peek()? == '\\' {
+                self.advance();
+                match self.peek()? {
+                    'n' => {
+                        self.source[self.current] = '\n';
+                        self.source.remove(self.current - 1);
+                        continue;
+                    }
+                    'r' => {
+                        self.source[self.current] = '\r';
+                        self.source.remove(self.current - 1);
+                        continue;
+                    }
+                    't' => {
+                        self.source[self.current] = '\t';
+                        self.source.remove(self.current - 1);
+                        continue;
+                    }
+                    '\'' => {
+                        self.source[self.current] = '\'';
+                        self.source.remove(self.current - 1);
+                        continue;
+                    }
+                    '"' => {
+                        self.source.remove(self.current - 1);
+                        continue;
+                    }
+                    '\\' => {
+                        self.source[self.current] = '\\';
+                        self.source.remove(self.current - 1);
+                        continue;
+                    }
+                    _ => {
+                        return Err(Error {
+                            message: "unrecognized escape sequence".into(),
+                            span: self.get_span(),
+                        });
+                    }
+                }
             }
 
             self.advance();
@@ -237,7 +278,8 @@ impl Lexer {
 
                 ';' => tokens.push(self.create_token(TokenKind::Semicolon)),
 
-                '"' => tokens.push(self.lex_string()?),
+                '"' => tokens.push(self.lex_string(c)?),
+                '\'' => tokens.push(self.lex_string(c)?),
 
                 '\n' => {
                     if let Some(prev_token) = tokens.last() {
@@ -287,9 +329,4 @@ impl Lexer {
 
         Ok(tokens)
     }
-}
-
-pub fn lex(source: Vec<char>) -> Result<Vec<Token>, Error> {
-    let mut lexer = Lexer::from_chars(source);
-    lexer.lex()
 }

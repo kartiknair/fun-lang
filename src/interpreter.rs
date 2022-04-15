@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt::Debug};
 
-use crate::{ast, token};
+use crate::{ast, lexer, parser, token};
 
 #[derive(Clone)]
 struct FunObj<'a> {
@@ -649,6 +649,50 @@ impl<'a> Interpreter<'a> {
                     });
 
                     println!("{}", args[0].to_string());
+
+                    interpreter.return_value = Some(Value::Null);
+                    interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
+                },
+            }),
+        );
+
+        self.namespace.insert(
+            "eval".to_string(),
+            Value::Fun(FunObj {
+                fun_lit: ast::FunLit {
+                    parameters: vec![],
+                    body: Box::new(ast::Expr {
+                        kind: ast::Block { stmts: vec![] }.into(),
+                        span: 0..0,
+                    }),
+                },
+                call: |interpreter: &mut Self, _: &ast::FunLit, args: Vec<Value<'a>>| {
+                    interpreter.call_stack.push(CallStackFrame {
+                        return_adr: interpreter.expr_pc,
+                    });
+
+                    if let Value::String(code) = &args[0] {
+                        let mut file = ast::File {
+                            source: code.chars().collect(),
+                            exprs: vec![],
+                        };
+
+                        let mut tokenizer = lexer::Lexer::from_chars(file.source.clone());
+                        match tokenizer.lex() {
+                            Ok(tokens) => {
+                                file.source = tokenizer.source;
+                                match parser::parse(&tokens) {
+                                    Ok(exprs) => {
+                                        file.exprs = exprs;
+                                        interpret(&file);
+                                        // TODO: get final expr value and return it
+                                    }
+                                    Err(_) => interpreter.return_value = Some(Value::Null),
+                                };
+                            }
+                            Err(_) => interpreter.return_value = Some(Value::Null),
+                        };
+                    }
 
                     interpreter.return_value = Some(Value::Null);
                     interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
