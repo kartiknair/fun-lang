@@ -9,10 +9,15 @@ mod token;
 
 fn main() -> Result<(), common::Error> {
     let demo_src = r#"
-        नमस्ते := "hello"
-        println(नमस्ते)
-        जोड़ें := (a, b) -> a + b
-        println(जोड़ें(23, 19))
+        fib := (n) -> {
+            if n < 2 {
+                n
+            } else {
+                fib(n-1) + fib(n-2)
+            }
+        }
+
+        println(fib(12))
     "#;
 
     let mut file = ast::File {

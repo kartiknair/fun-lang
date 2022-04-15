@@ -292,14 +292,12 @@ impl<'a> Parser<'a> {
                     let first_key = self.peek()?.clone();
                     self.current += 1;
 
-                    if self.current < self.tokens.len() && self.peek()?.kind == TokenKind::Colon {
+                    if self.peek()?.kind == TokenKind::Colon {
                         self.current += 1;
                         let first_value = self.parse_expr()?;
 
                         let mut inits = vec![(first_key, first_value)];
-                        while self.current < self.tokens.len()
-                            && self.peek()?.kind == TokenKind::Comma
-                        {
+                        while self.peek()?.kind == TokenKind::Comma {
                             self.current += 1;
                             if self.peek()?.kind == TokenKind::RightBrace {
                                 break;
@@ -342,7 +340,7 @@ impl<'a> Parser<'a> {
                         //   bar;
                         //   5 + 6;
                         // }
-                        self.current -= 3;
+                        self.current -= 2;
                         expr = Some(ast::Expr {
                             kind: self.parse_block()?.into(),
                             span: token.span.clone(),
@@ -401,7 +399,7 @@ impl<'a> Parser<'a> {
             TokenKind::Ident => {
                 self.current += 1;
 
-                if self.current < self.tokens.len() && self.peek()?.kind == TokenKind::ColonEqual {
+                if self.peek()?.kind == TokenKind::ColonEqual {
                     self.current += 1;
                     let init = self.parse_expr()?;
 

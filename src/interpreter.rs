@@ -196,6 +196,62 @@ struct Interpreter<'a> {
 }
 
 impl<'a> Interpreter<'a> {
+    fn lvalue_reference(&mut self, expr: &ast::Expr) -> Option<&mut Value<'a>> {
+        match &expr.kind {
+            ast::ExprKind::Var(var_expr) => self
+                .namespace
+                .get_mut(&self.file.lexeme(&var_expr.ident.span)),
+
+            ast::ExprKind::Idx(idx_expr) => {
+                let idx = self.interpret_expr(&*idx_expr.idx);
+                let target = if let Some(value) = self.lvalue_reference(&*idx_expr.target) {
+                    value
+                } else {
+                    return None;
+                };
+                if let Value::Arr(target) = target {
+                    if let Value::Number(idx) = idx {
+                        let int_part = idx.trunc();
+                        if int_part != idx {
+                            None
+                        } else {
+                            target.get_mut(int_part as usize)
+                        }
+                    } else {
+                        None
+                    }
+                } else if let Value::Obj(target) = target {
+                    if let Value::String(idx) = idx {
+                        target.get_mut(&idx)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            ast::ExprKind::Binary(binary_expr) => {
+                let key = if let ast::ExprKind::Var(var_expr) = &binary_expr.right.kind {
+                    self.file.lexeme(&var_expr.ident.span)
+                } else {
+                    return None;
+                };
+                let obj = if let Some(value) = self.lvalue_reference(&*binary_expr.left) {
+                    value
+                } else {
+                    return None;
+                };
+
+                if let Value::Obj(obj) = obj {
+                    obj.get_mut(&key)
+                } else {
+                    None
+                }
+            }
+            _ => unimplemented!(),
+        }
+    }
+
     fn interpret_expr(&mut self, expr: &ast::Expr) -> Value<'a> {
         match &expr.kind {
             ast::ExprKind::FunLit(fun_lit) => {
@@ -329,24 +385,13 @@ impl<'a> Interpreter<'a> {
             ast::ExprKind::Binary(binary_expr) => {
                 if binary_expr.op.kind == token::TokenKind::Equal {
                     let new_value = self.interpret_expr(&*binary_expr.right);
-
-                    match &binary_expr.left.kind {
-                        ast::ExprKind::Var(var_expr) => {
-                            if let Some(ref_to_var) = self
-                                .namespace
-                                .get_mut(&self.file.lexeme(&var_expr.ident.span))
-                            {
-                                *ref_to_var = new_value.clone();
-                                return new_value;
-                            } else {
-                                return Value::Null;
-                            }
-                        }
-
-                        ast::ExprKind::Idx(_) => todo!(),
-                        ast::ExprKind::Binary(_) => todo!(),
-                        _ => unimplemented!(),
-                    }
+                    let lvalue = self.lvalue_reference(&*binary_expr.left);
+                    return if let Some(lvalue) = lvalue {
+                        *lvalue = new_value.clone();
+                        new_value
+                    } else {
+                        Value::Null
+                    };
                 }
 
                 let left_value = self.interpret_expr(&*binary_expr.left);
@@ -493,8 +538,9 @@ impl<'a> Interpreter<'a> {
             }
             ast::ExprKind::Idx(idx_expr) => {
                 let target_value = self.interpret_expr(&*idx_expr.target);
+                let idx_value = self.interpret_expr(&*idx_expr.idx);
+
                 if let Value::Arr(vec) = target_value {
-                    let idx_value = self.interpret_expr(&*idx_expr.idx);
                     if let Value::Number(idx) = idx_value {
                         let int_part = idx.trunc();
                         if int_part != idx {
@@ -502,6 +548,12 @@ impl<'a> Interpreter<'a> {
                         } else {
                             vec[int_part as usize].clone()
                         }
+                    } else {
+                        Value::Null
+                    }
+                } else if let Value::Obj(obj) = target_value {
+                    if let Value::String(idx) = idx_value {
+                        obj.get(&idx).unwrap_or(&Value::Null).clone()
                     } else {
                         Value::Null
                     }
