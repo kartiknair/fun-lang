@@ -31,6 +31,7 @@ pub struct WhileStmt {
 #[derive(Debug, Clone)]
 pub struct ReturnStmt {
     pub value: Box<Expr>,
+    pub err: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +70,12 @@ pub struct CallExpr {
 }
 
 #[derive(Debug, Clone)]
+pub struct CatchExpr {
+    pub target: Box<Expr>,
+    pub callback: FunLit,
+}
+
+#[derive(Debug, Clone)]
 pub struct ObjectLit {
     pub inits: Vec<(token::Token, Expr)>,
 }
@@ -101,6 +108,7 @@ pub enum ExprKind {
     Idx(IdxExpr),
     Var(VarExpr),
     Call(CallExpr),
+    Catch(CatchExpr),
     ObjectLit(ObjectLit),
     ArrLit(ArrLit),
     Lit(Lit),

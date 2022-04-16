@@ -1,4 +1,6 @@
-use std::{collections::HashMap, fmt::Debug};
+use rand::Rng;
+use std::{collections::HashMap, fmt::Debug, fs, process::exit};
+use tiny_http::{Response, Server};
 
 use crate::{ast, lexer, parser, token};
 
@@ -32,6 +34,7 @@ enum Value<'a> {
     Number(f64),
     String(String),
 
+    Err(Box<Value<'a>>),
     Fun(FunObj<'a>),
     Arr(Vec<Value<'a>>),
     Obj(HashMap<String, Value<'a>>),
@@ -43,6 +46,7 @@ impl<'a> Value<'a> {
             Value::Null => false,
             Value::True => true,
             Value::False => false,
+            Value::Err(_) => false,
             Value::Number(number) => *number != 0.0,
             Value::String(string) => !string.is_empty(),
             Value::Fun(_) => true,
@@ -108,6 +112,7 @@ impl<'a> ToString for Value<'a> {
             Value::False => "false".to_string(),
             Value::Number(number) => format!("{}", number),
             Value::String(string) => string.clone(),
+            Value::Err(value) => format!("error<{}>", value.to_string()),
             Value::Fun(_) => "<function>".to_string(),
             Value::Arr(values) => {
                 format!(
@@ -183,6 +188,7 @@ impl<'a> ScopeStack<'a> {
 
 #[derive(Debug, Clone)]
 struct CallStackFrame {
+    id: usize,
     return_adr: usize,
 }
 
@@ -215,6 +221,12 @@ impl<'a> Interpreter<'a> {
                         if int_part != idx {
                             None
                         } else {
+                            let int_part = int_part as usize;
+                            if int_part >= target.len() {
+                                for _ in target.len() - 1..int_part {
+                                    target.push(Value::Null);
+                                }
+                            }
                             target.get_mut(int_part as usize)
                         }
                     } else {
@@ -222,6 +234,9 @@ impl<'a> Interpreter<'a> {
                     }
                 } else if let Value::Obj(target) = target {
                     if let Value::String(idx) = idx {
+                        if !target.contains_key(&idx) {
+                            target.insert(idx.clone(), Value::Null);
+                        }
                         target.get_mut(&idx)
                     } else {
                         None
@@ -252,12 +267,46 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    fn interpret_call(&mut self, call_expr: &ast::CallExpr, panic_on_err: bool) -> Value<'a> {
+        let callee = self.interpret_expr(&*call_expr.callee);
+
+        if let Value::Fun(fun_obj) = callee {
+            let interpreted_args = call_expr
+                .args
+                .iter()
+                .map(|expr| self.interpret_expr(expr))
+                .collect::<Vec<_>>();
+
+            fun_obj.call(self, interpreted_args);
+
+            if panic_on_err {
+                if let Some(return_value) = &self.return_value {
+                    if let Value::Err(err) = return_value {
+                        self.panic(&*err);
+                    }
+                }
+            }
+
+            self.return_value.as_ref().unwrap().clone()
+        } else {
+            Value::Null
+        }
+    }
+
+    fn panic(&self, value: &Value) -> ! {
+        println!("{}", value.to_string());
+        exit(1);
+    }
+
     fn interpret_expr(&mut self, expr: &ast::Expr) -> Value<'a> {
         match &expr.kind {
             ast::ExprKind::FunLit(fun_lit) => {
                 let call = |interpreter: &mut Self, fun_lit: &ast::FunLit, args: Vec<Value<'a>>| {
+                    let return_adr = interpreter.expr_pc;
+                    let call_frame_id = interpreter.call_stack.len();
                     interpreter.call_stack.push(CallStackFrame {
-                        return_adr: interpreter.expr_pc,
+                        id: call_frame_id,
+                        return_adr,
                     });
 
                     let fun_arg_names = fun_lit
@@ -274,11 +323,25 @@ impl<'a> Interpreter<'a> {
                             .insert(fun_arg_names[i].to_string(), arg.clone());
                     }
 
-                    interpreter.return_value = Some(interpreter.interpret_expr(&*fun_lit.body));
-                    if let Some(function_call_frame) = interpreter.call_stack.pop() {
-                        // Meaning an early return has not occured
-                        interpreter.expr_pc = function_call_frame.return_adr;
-                        interpreter.namespace.unnest();
+                    if let ast::ExprKind::Block(block_expr) = &fun_lit.body.kind {
+                        for (i, expr) in block_expr.stmts.iter().enumerate() {
+                            let value = interpreter.interpret_expr(expr);
+                            if let Some(last_call_frame) = interpreter.call_stack.last() {
+                                if last_call_frame.id != call_frame_id {
+                                    // Early return just happened
+                                    break;
+                                } else if i == block_expr.stmts.len() - 1 {
+                                    interpreter.return_value = Some(value);
+                                    // Explicit return has not occured
+                                    interpreter.expr_pc = return_adr;
+                                    interpreter.namespace.unnest();
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    } else {
+                        interpreter.return_value = Some(interpreter.interpret_expr(&*fun_lit.body));
                     }
                 };
 
@@ -313,6 +376,12 @@ impl<'a> Interpreter<'a> {
             }
             ast::ExprKind::ReturnStmt(ret_stmt) => {
                 self.return_value = Some(self.interpret_expr(&ret_stmt.value));
+                // dbg!(&self.return_value);
+                if ret_stmt.err {
+                    self.return_value = Some(Value::Err(Box::new(
+                        self.return_value.as_ref().unwrap().clone(),
+                    )));
+                }
                 self.expr_pc = self.call_stack.pop().unwrap().return_adr;
                 self.namespace.unnest();
                 Value::Null
@@ -569,18 +638,28 @@ impl<'a> Interpreter<'a> {
                     Value::Null
                 }
             }
-            ast::ExprKind::Call(call_expr) => {
-                let callee = self.interpret_expr(&*call_expr.callee);
-
-                if let Value::Fun(fun_obj) = callee {
-                    let interpretd_args = call_expr
-                        .args
-                        .iter()
-                        .map(|expr| self.interpret_expr(expr))
-                        .collect::<Vec<_>>();
-
-                    fun_obj.call(self, interpretd_args);
-                    self.return_value.as_ref().unwrap().clone()
+            ast::ExprKind::Call(call_expr) => self.interpret_call(call_expr, true),
+            ast::ExprKind::Catch(catch_expr) => {
+                // Error values can only be generated by a function call
+                if let ast::ExprKind::Call(call_expr) = &catch_expr.target.kind {
+                    let ret_value = self.interpret_call(call_expr, false);
+                    if let Value::Err(err_value) = ret_value {
+                        let err_callback = self.interpret_expr(&ast::Expr {
+                            kind: ast::ExprKind::FunLit(catch_expr.callback.clone()),
+                            span: 0..0,
+                        });
+                        if let Value::Fun(fun_obj) = err_callback {
+                            fun_obj.call(self, vec![*err_value.clone()]);
+                            if let Value::Err(err) = self.return_value.as_ref().unwrap() {
+                                self.panic(&*err);
+                            }
+                            self.return_value.as_ref().unwrap().clone()
+                        } else {
+                            unreachable!()
+                        }
+                    } else {
+                        ret_value
+                    }
                 } else {
                     Value::Null
                 }
@@ -589,8 +668,7 @@ impl<'a> Interpreter<'a> {
                 let mut obj_map = HashMap::new();
                 for (token, value) in &obj_lit.inits {
                     let key_name = if token.kind == token::TokenKind::String {
-                        let string_with_quotes = self.file.lexeme(&token.span);
-                        string_with_quotes[1..string_with_quotes.len() - 1].to_string()
+                        self.file.lexeme(&token.span).to_string()
                     } else if token.kind == token::TokenKind::Ident {
                         self.file.lexeme(&token.span)
                     } else {
@@ -633,72 +711,434 @@ impl<'a> Interpreter<'a> {
     }
 
     fn interpret(&mut self) {
-        self.namespace.insert(
-            "println".to_string(),
-            Value::Fun(FunObj {
-                fun_lit: ast::FunLit {
-                    parameters: vec![],
-                    body: Box::new(ast::Expr {
-                        kind: ast::Block { stmts: vec![] }.into(),
-                        span: 0..0,
-                    }),
-                },
-                call: |interpreter: &mut Self, _: &ast::FunLit, args: Vec<Value<'a>>| {
-                    interpreter.call_stack.push(CallStackFrame {
-                        return_adr: interpreter.expr_pc,
-                    });
+        let builtins = [
+            // len(arr: array | object): number
+            (
+                "len".to_string(),
+                Value::Fun(FunObj {
+                    fun_lit: ast::FunLit {
+                        parameters: vec![],
+                        body: Box::new(ast::Expr {
+                            kind: ast::Block { stmts: vec![] }.into(),
+                            span: 0..0,
+                        }),
+                    },
+                    call: |interpreter: &mut Self, _: &ast::FunLit, args: Vec<Value<'a>>| {
+                        interpreter.call_stack.push(CallStackFrame {
+                            id: interpreter.call_stack.len(),
+                            return_adr: interpreter.expr_pc,
+                        });
 
-                    println!("{}", args[0].to_string());
-
-                    interpreter.return_value = Some(Value::Null);
-                    interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
-                },
-            }),
-        );
-
-        self.namespace.insert(
-            "eval".to_string(),
-            Value::Fun(FunObj {
-                fun_lit: ast::FunLit {
-                    parameters: vec![],
-                    body: Box::new(ast::Expr {
-                        kind: ast::Block { stmts: vec![] }.into(),
-                        span: 0..0,
-                    }),
-                },
-                call: |interpreter: &mut Self, _: &ast::FunLit, args: Vec<Value<'a>>| {
-                    interpreter.call_stack.push(CallStackFrame {
-                        return_adr: interpreter.expr_pc,
-                    });
-
-                    if let Value::String(code) = &args[0] {
-                        let mut file = ast::File {
-                            source: code.chars().collect(),
-                            exprs: vec![],
-                        };
-
-                        let mut tokenizer = lexer::Lexer::from_chars(file.source.clone());
-                        match tokenizer.lex() {
-                            Ok(tokens) => {
-                                file.source = tokenizer.source;
-                                match parser::parse(&tokens) {
-                                    Ok(exprs) => {
-                                        file.exprs = exprs;
-                                        interpret(&file);
-                                        // TODO: get final expr value and return it
-                                    }
-                                    Err(_) => interpreter.return_value = Some(Value::Null),
-                                };
+                        interpreter.return_value = Some(if let Some(value) = args.get(0) {
+                            match value {
+                                Value::Arr(arr) => Value::Number(arr.len() as f64),
+                                Value::Obj(obj) => Value::Number(obj.len() as f64),
+                                _ => Value::Err(Box::new(Value::String(
+                                    "argument must be array or object".to_string(),
+                                ))),
                             }
-                            Err(_) => interpreter.return_value = Some(Value::Null),
-                        };
-                    }
+                        } else {
+                            Value::Err(Box::new(Value::String("expected argument".to_string())))
+                        });
 
-                    interpreter.return_value = Some(Value::Null);
-                    interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
-                },
-            }),
-        );
+                        interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
+                    },
+                }),
+            ),
+            // keys(obj: object): array
+            (
+                "keys".to_string(),
+                Value::Fun(FunObj {
+                    fun_lit: ast::FunLit {
+                        parameters: vec![],
+                        body: Box::new(ast::Expr {
+                            kind: ast::Block { stmts: vec![] }.into(),
+                            span: 0..0,
+                        }),
+                    },
+                    call: |interpreter: &mut Self, _: &ast::FunLit, args: Vec<Value<'a>>| {
+                        interpreter.call_stack.push(CallStackFrame {
+                            id: interpreter.call_stack.len(),
+                            return_adr: interpreter.expr_pc,
+                        });
+
+                        interpreter.return_value = Some(if let Some(first_arg) = args.get(0) {
+                            if let Value::Obj(obj) = first_arg {
+                                Value::Arr(
+                                    obj.keys()
+                                        .cloned()
+                                        .map(|string| Value::String(string))
+                                        .collect(),
+                                )
+                            } else {
+                                Value::Err(Box::new(Value::String(
+                                    "first argument must be object".to_string(),
+                                )))
+                            }
+                        } else {
+                            Value::Err(Box::new(Value::String(
+                                "expected first argument".to_string(),
+                            )))
+                        });
+
+                        interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
+                    },
+                }),
+            ),
+            // values(obj: object): array
+            (
+                "values".to_string(),
+                Value::Fun(FunObj {
+                    fun_lit: ast::FunLit {
+                        parameters: vec![],
+                        body: Box::new(ast::Expr {
+                            kind: ast::Block { stmts: vec![] }.into(),
+                            span: 0..0,
+                        }),
+                    },
+                    call: |interpreter: &mut Self, _: &ast::FunLit, args: Vec<Value<'a>>| {
+                        interpreter.call_stack.push(CallStackFrame {
+                            id: interpreter.call_stack.len(),
+                            return_adr: interpreter.expr_pc,
+                        });
+
+                        interpreter.return_value = Some(if let Some(first_arg) = args.get(0) {
+                            if let Value::Obj(obj) = first_arg {
+                                Value::Arr(obj.values().cloned().collect())
+                            } else {
+                                Value::Err(Box::new(Value::String(
+                                    "first argument must be object".to_string(),
+                                )))
+                            }
+                        } else {
+                            Value::Err(Box::new(Value::String(
+                                "expected first argument".to_string(),
+                            )))
+                        });
+
+                        interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
+                    },
+                }),
+            ),
+            // type(value: any): string
+            (
+                "type".to_string(),
+                Value::Fun(FunObj {
+                    fun_lit: ast::FunLit {
+                        parameters: vec![],
+                        body: Box::new(ast::Expr {
+                            kind: ast::Block { stmts: vec![] }.into(),
+                            span: 0..0,
+                        }),
+                    },
+                    call: |interpreter: &mut Self, _: &ast::FunLit, args: Vec<Value<'a>>| {
+                        interpreter.call_stack.push(CallStackFrame {
+                            id: interpreter.call_stack.len(),
+                            return_adr: interpreter.expr_pc,
+                        });
+
+                        interpreter.return_value = Some(Value::String(
+                            match args[0] {
+                                Value::Null => "null",
+                                Value::True | Value::False => "boolean",
+                                Value::Number(_) => "number",
+                                Value::String(_) => "string",
+                                Value::Err(_) => "error",
+                                Value::Fun(_) => "function",
+                                Value::Arr(_) => "array",
+                                Value::Obj(_) => "object",
+                            }
+                            .to_string(),
+                        ));
+
+                        interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
+                    },
+                }),
+            ),
+            // eval(code: string)
+            (
+                "eval".to_string(),
+                Value::Fun(FunObj {
+                    fun_lit: ast::FunLit {
+                        parameters: vec![],
+                        body: Box::new(ast::Expr {
+                            kind: ast::Block { stmts: vec![] }.into(),
+                            span: 0..0,
+                        }),
+                    },
+                    call: |interpreter: &mut Self, _: &ast::FunLit, args: Vec<Value<'a>>| {
+                        interpreter.call_stack.push(CallStackFrame {
+                            id: interpreter.call_stack.len(),
+                            return_adr: interpreter.expr_pc,
+                        });
+
+                        if let Value::String(code) = &args[0] {
+                            let mut file = ast::File {
+                                source: code.chars().collect(),
+                                exprs: vec![],
+                            };
+
+                            let mut tokenizer = lexer::Lexer::from_chars(file.source.clone());
+                            match tokenizer.lex() {
+                                Ok(tokens) => {
+                                    file.source = tokenizer.source;
+                                    match parser::parse(&tokens) {
+                                        Ok(exprs) => {
+                                            file.exprs = exprs;
+                                            interpret(&file);
+                                            // TODO: get final expr value and return it
+                                        }
+                                        Err(_) => interpreter.return_value = Some(Value::Null),
+                                    };
+                                }
+                                Err(_) => interpreter.return_value = Some(Value::Null),
+                            };
+                        }
+
+                        interpreter.return_value = Some(Value::Null);
+                        interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
+                    },
+                }),
+            ),
+            // print(value: any)
+            (
+                "print".to_string(),
+                Value::Fun(FunObj {
+                    fun_lit: ast::FunLit {
+                        parameters: vec![],
+                        body: Box::new(ast::Expr {
+                            kind: ast::Block { stmts: vec![] }.into(),
+                            span: 0..0,
+                        }),
+                    },
+                    call: |interpreter: &mut Self, _: &ast::FunLit, args: Vec<Value<'a>>| {
+                        interpreter.call_stack.push(CallStackFrame {
+                            id: interpreter.call_stack.len(),
+                            return_adr: interpreter.expr_pc,
+                        });
+
+                        println!("{}", args[0].to_string());
+
+                        interpreter.return_value = Some(Value::Null);
+                        interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
+                    },
+                }),
+            ),
+            // read_file(path: string): string
+            (
+                "read_file".to_string(),
+                Value::Fun(FunObj {
+                    fun_lit: ast::FunLit {
+                        parameters: vec![],
+                        body: Box::new(ast::Expr {
+                            kind: ast::Block { stmts: vec![] }.into(),
+                            span: 0..0,
+                        }),
+                    },
+                    call: |interpreter: &mut Self, _: &ast::FunLit, args: Vec<Value<'a>>| {
+                        interpreter.call_stack.push(CallStackFrame {
+                            id: interpreter.call_stack.len(),
+                            return_adr: interpreter.expr_pc,
+                        });
+
+                        if let Value::String(path) = &args[0] {
+                            interpreter.return_value = Some(match fs::read_to_string(path) {
+                                Ok(contents) => Value::String(contents),
+                                Err(err) => Value::Err(Box::new(Value::String(err.to_string()))),
+                            });
+                        } else {
+                            interpreter.return_value = Some(Value::Err(Box::new(Value::String(
+                                "path must be string".to_string(),
+                            ))));
+                        }
+
+                        interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
+                    },
+                }),
+            ),
+            // write_file(path: string, contents: string)
+            (
+                "write_file".to_string(),
+                Value::Fun(FunObj {
+                    fun_lit: ast::FunLit {
+                        parameters: vec![],
+                        body: Box::new(ast::Expr {
+                            kind: ast::Block { stmts: vec![] }.into(),
+                            span: 0..0,
+                        }),
+                    },
+                    call: |interpreter: &mut Self, _: &ast::FunLit, args: Vec<Value<'a>>| {
+                        interpreter.call_stack.push(CallStackFrame {
+                            id: interpreter.call_stack.len(),
+                            return_adr: interpreter.expr_pc,
+                        });
+
+                        if let Value::String(path) = &args[0] {
+                            if let Value::String(contents) = &args[1] {
+                                interpreter.return_value =
+                                    Some(if let Err(err) = fs::write(path, contents) {
+                                        Value::Err(Box::new(Value::String(err.to_string())))
+                                    } else {
+                                        Value::Null
+                                    });
+                            } else {
+                                interpreter.return_value = Some(Value::Err(Box::new(
+                                    Value::String("contents must be string".to_string()),
+                                )));
+                            }
+                        } else {
+                            interpreter.return_value = Some(Value::Err(Box::new(Value::String(
+                                "path must be string".to_string(),
+                            ))));
+                        }
+
+                        interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
+                    },
+                }),
+            ),
+            // serve(callback: (request: object) -> string, options: object)
+            (
+                "serve".to_string(),
+                Value::Fun(FunObj {
+                    fun_lit: ast::FunLit {
+                        parameters: vec![],
+                        body: Box::new(ast::Expr {
+                            kind: ast::Block { stmts: vec![] }.into(),
+                            span: 0..0,
+                        }),
+                    },
+                    call: |interpreter: &mut Self, _: &ast::FunLit, args: Vec<Value<'a>>| {
+                        interpreter.call_stack.push(CallStackFrame {
+                            id: interpreter.call_stack.len(),
+                            return_adr: interpreter.expr_pc,
+                        });
+
+                        let options = if let Some(options) = args.get(1) {
+                            if let Value::Obj(options) = options {
+                                Some(options)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        match Server::http(&format!(
+                            "0.0.0.0:{}",
+                            if let Some(options) = options {
+                                if let Some(port_value) = options.get("port") {
+                                    if let Value::Number(port) = port_value {
+                                        *port as u64
+                                    } else {
+                                        8080
+                                    }
+                                } else {
+                                    8080
+                                }
+                            } else {
+                                8080
+                            }
+                        )) {
+                            Ok(server) => {
+                                for request in server.incoming_requests() {
+                                    let mut request_obj = HashMap::new();
+                                    request_obj.insert(
+                                        "method".to_string(),
+                                        Value::String(
+                                            match request.method() {
+                                                tiny_http::Method::Get => "GET",
+                                                tiny_http::Method::Head => "HEAD",
+                                                tiny_http::Method::Post => "POST",
+                                                tiny_http::Method::Put => "PUT",
+                                                tiny_http::Method::Delete => "DELETE",
+                                                tiny_http::Method::Connect => "CONNECT",
+                                                tiny_http::Method::Options => "OPTIONS",
+                                                tiny_http::Method::Trace => "TRACE",
+                                                tiny_http::Method::Patch => "PATCH",
+                                                tiny_http::Method::NonStandard(_) => todo!(),
+                                            }
+                                            .to_string(),
+                                        ),
+                                    );
+                                    request_obj.insert(
+                                        "url".to_string(),
+                                        Value::String(request.url().to_string()),
+                                    );
+                                    request_obj.insert(
+                                        "headers".to_string(),
+                                        Value::Arr(
+                                            request
+                                                .headers()
+                                                .iter()
+                                                .map(|header| {
+                                                    let mut obj = HashMap::new();
+                                                    obj.insert(
+                                                        header.field.as_str().to_string(),
+                                                        Value::String(header.value.to_string()),
+                                                    );
+                                                    Value::Obj(obj)
+                                                })
+                                                .collect(),
+                                        ),
+                                    );
+
+                                    if let Value::Fun(callback) = &args[0] {
+                                        callback.call(interpreter, vec![Value::Obj(request_obj)]);
+                                        if let Some(Value::String(ref response_value)) =
+                                            interpreter.return_value
+                                        {
+                                            let response =
+                                                Response::from_string(response_value.to_string());
+
+                                            if let Err(err) = request.respond(response) {
+                                                interpreter.return_value = Some(Value::Err(
+                                                    Box::new(Value::String(err.to_string())),
+                                                ));
+                                                break;
+                                            };
+                                        }
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                interpreter.return_value =
+                                    Some(Value::Err(Box::new(Value::String(err.to_string()))));
+                            }
+                        }
+
+                        interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
+                    },
+                }),
+            ),
+            // rand(): number
+            (
+                "rand".to_string(),
+                Value::Fun(FunObj {
+                    fun_lit: ast::FunLit {
+                        parameters: vec![],
+                        body: Box::new(ast::Expr {
+                            kind: ast::Block { stmts: vec![] }.into(),
+                            span: 0..0,
+                        }),
+                    },
+                    call: |interpreter: &mut Self, _: &ast::FunLit, _args: Vec<Value<'a>>| {
+                        interpreter.call_stack.push(CallStackFrame {
+                            id: interpreter.call_stack.len(),
+                            return_adr: interpreter.expr_pc,
+                        });
+
+                        let mut rng = rand::thread_rng();
+                        interpreter.return_value = Some(Value::Number(rng.gen::<f64>()));
+
+                        interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
+                    },
+                }),
+            ),
+        ];
+
+        for (name, builtin) in builtins {
+            self.namespace.insert(name, builtin)
+        }
 
         self.expr_pc = 0;
         while let Some(expr) = self.file.exprs.get(self.expr_pc) {

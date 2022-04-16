@@ -9,7 +9,11 @@ mod token;
 
 fn main() -> Result<(), common::Error> {
     let demo_src = r#"
-        eval('println("hello");')
+        obj := {"foo bar": "bruh"}
+        print(obj)
+
+        obj["foo"] = "yo"
+        print(obj)
     "#;
 
     let mut file = ast::File {

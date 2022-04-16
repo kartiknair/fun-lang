@@ -16,6 +16,8 @@ pub enum TokenKind {
     If,
     Else,
     While,
+    Err,
+    Catch,
 
     // symbols
     LeftParen,
@@ -63,6 +65,8 @@ impl TokenKind {
             "if" => Some(TokenKind::If),
             "else" => Some(TokenKind::Else),
             "while" => Some(TokenKind::While),
+            "err" => Some(TokenKind::Err),
+            "catch" => Some(TokenKind::Catch),
             _ => None,
         }
     }

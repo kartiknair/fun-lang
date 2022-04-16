@@ -157,6 +157,36 @@ impl<'a> Parser<'a> {
         Ok(ast::Block { stmts })
     }
 
+    fn parse_fun_lit(&mut self) -> Result<ast::FunLit, Error> {
+        self.current += 1;
+
+        let mut parameters = Vec::new();
+        if self.peek()?.kind != TokenKind::RightParen {
+            loop {
+                let param_ident = self
+                    .expect(TokenKind::Ident, "expect parameter name")?
+                    .clone();
+                parameters.push(param_ident);
+
+                if self.peek()?.kind != TokenKind::Comma {
+                    break;
+                } else {
+                    self.current += 1;
+                }
+            }
+        }
+        self.expect(TokenKind::RightParen, "missing closing ')'")?;
+
+        self.current += 1;
+
+        let fun_body = self.parse_expr()?;
+
+        Ok(ast::FunLit {
+            parameters,
+            body: Box::new(fun_body),
+        })
+    }
+
     fn parse_primary(&mut self) -> Result<ast::Expr, Error> {
         let mut expr = None;
 
@@ -274,11 +304,18 @@ impl<'a> Parser<'a> {
             TokenKind::Return => {
                 self.current += 1;
 
+                let err = if self.peek()?.kind == TokenKind::Err {
+                    self.current += 1;
+                    true
+                } else {
+                    false
+                };
                 let value = self.parse_expr()?;
 
                 expr = Some(ast::Expr {
                     kind: ast::ReturnStmt {
                         value: Box::new(value),
+                        err,
                     }
                     .into(),
                     span: token.span.clone(),
@@ -445,6 +482,7 @@ impl<'a> Parser<'a> {
         while self.peek()?.kind == TokenKind::LeftParen
             || self.peek()?.kind == TokenKind::LeftBracket
             || self.peek()?.kind == TokenKind::Dot
+            || self.peek()?.kind == TokenKind::Catch
         {
             match self.peek()?.kind {
                 TokenKind::LeftParen => {
@@ -516,6 +554,21 @@ impl<'a> Parser<'a> {
                         }
                         .into(),
                     };
+                }
+                TokenKind::Catch => {
+                    let catch_token = self.peek()?.clone();
+                    self.current += 1;
+
+                    let callback = self.parse_fun_lit()?;
+
+                    expr = ast::Expr {
+                        span: catch_token.span.start..self.tokens[self.current].span.end,
+                        kind: ast::CatchExpr {
+                            target: Box::new(expr),
+                            callback,
+                        }
+                        .into(),
+                    }
                 }
                 _ => {}
             }
