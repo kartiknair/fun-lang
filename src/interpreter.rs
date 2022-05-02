@@ -1,6 +1,7 @@
 use rand::Rng;
 use std::{collections::HashMap, fmt::Debug, fs, process::exit};
 use tiny_http::{Response, Server};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{ast, lexer, parser, token};
 
@@ -374,6 +375,54 @@ impl<'a> Interpreter<'a> {
 
                 Value::Null
             }
+            ast::ExprKind::ForStmt(for_stmt) => {
+                let iterable = self.interpret_expr(&*for_stmt.iterable);
+                match &iterable {
+                    Value::String(string) => {
+                        for grapheme in string.graphemes(true) {
+                            self.namespace.nest();
+                            self.namespace.insert(
+                                self.file.lexeme(&for_stmt.ident.span),
+                                Value::String(grapheme.to_string()),
+                            );
+                            self.interpret_expr(&ast::Expr {
+                                kind: for_stmt.block.clone().into(),
+                                span: 0..0,
+                            });
+                            self.namespace.unnest();
+                        }
+                    }
+                    Value::Arr(arr) => {
+                        for el in arr {
+                            self.namespace.nest();
+                            self.namespace
+                                .insert(self.file.lexeme(&for_stmt.ident.span), el.clone());
+                            self.interpret_expr(&ast::Expr {
+                                kind: for_stmt.block.clone().into(),
+                                span: 0..0,
+                            });
+                            self.namespace.unnest();
+                        }
+                    }
+                    Value::Obj(obj) => {
+                        for el in obj {
+                            self.namespace.nest();
+                            self.namespace.insert(
+                                self.file.lexeme(&for_stmt.ident.span),
+                                Value::Arr(vec![Value::String(el.0.clone()), el.1.clone()]),
+                            );
+                            self.interpret_expr(&ast::Expr {
+                                kind: for_stmt.block.clone().into(),
+                                span: 0..0,
+                            });
+                            self.namespace.unnest();
+                        }
+                    }
+                    _ => {}
+                }
+
+                Value::Null
+            }
             ast::ExprKind::ReturnStmt(ret_stmt) => {
                 self.return_value = Some(self.interpret_expr(&ret_stmt.value));
                 // dbg!(&self.return_value);
@@ -712,7 +761,7 @@ impl<'a> Interpreter<'a> {
 
     fn interpret(&mut self) {
         let builtins = [
-            // len(arr: array | object): number
+            // len(iterable: array | object | string): number
             (
                 "len".to_string(),
                 Value::Fun(FunObj {
@@ -731,8 +780,76 @@ impl<'a> Interpreter<'a> {
 
                         interpreter.return_value = Some(if let Some(value) = args.get(0) {
                             match value {
+                                Value::String(string) => Value::Number(
+                                    string.graphemes(true).collect::<Vec<_>>().len() as f64,
+                                ),
                                 Value::Arr(arr) => Value::Number(arr.len() as f64),
                                 Value::Obj(obj) => Value::Number(obj.len() as f64),
+                                _ => Value::Err(Box::new(Value::String(
+                                    "argument must be array or object".to_string(),
+                                ))),
+                            }
+                        } else {
+                            Value::Err(Box::new(Value::String("expected argument".to_string())))
+                        });
+
+                        interpreter.expr_pc = interpreter.call_stack.pop().unwrap().return_adr;
+                    },
+                }),
+            ),
+            // enumerate(iterable: array | object | string): array
+            (
+                "enumerate".to_string(),
+                Value::Fun(FunObj {
+                    fun_lit: ast::FunLit {
+                        parameters: vec![],
+                        body: Box::new(ast::Expr {
+                            kind: ast::Block { stmts: vec![] }.into(),
+                            span: 0..0,
+                        }),
+                    },
+                    call: |interpreter: &mut Self, _: &ast::FunLit, args: Vec<Value<'a>>| {
+                        interpreter.call_stack.push(CallStackFrame {
+                            id: interpreter.call_stack.len(),
+                            return_adr: interpreter.expr_pc,
+                        });
+
+                        interpreter.return_value = Some(if let Some(value) = args.get(0) {
+                            match value {
+                                Value::String(string) => Value::Arr(
+                                    string
+                                        .graphemes(true)
+                                        .enumerate()
+                                        .map(|(i, string)| {
+                                            Value::Arr(vec![
+                                                Value::Number(i as f64),
+                                                Value::String(string.to_string()),
+                                            ])
+                                        })
+                                        .collect(),
+                                ),
+                                Value::Arr(arr) => Value::Arr(
+                                    arr.iter()
+                                        .enumerate()
+                                        .map(|(i, value)| {
+                                            Value::Arr(vec![Value::Number(i as f64), value.clone()])
+                                        })
+                                        .collect(),
+                                ),
+                                Value::Obj(obj) => Value::Arr(
+                                    obj.iter()
+                                        .enumerate()
+                                        .map(|(i, value)| {
+                                            Value::Arr(vec![
+                                                Value::Number(i as f64),
+                                                Value::Arr(vec![
+                                                    Value::String(value.0.clone()),
+                                                    value.1.clone(),
+                                                ]),
+                                            ])
+                                        })
+                                        .collect(),
+                                ),
                                 _ => Value::Err(Box::new(Value::String(
                                     "argument must be array or object".to_string(),
                                 ))),

@@ -16,6 +16,8 @@ pub enum TokenKind {
     If,
     Else,
     While,
+    For,
+    In,
     Err,
     Catch,
 
@@ -65,6 +67,8 @@ impl TokenKind {
             "if" => Some(TokenKind::If),
             "else" => Some(TokenKind::Else),
             "while" => Some(TokenKind::While),
+            "for" => Some(TokenKind::For),
+            "in" => Some(TokenKind::In),
             "err" => Some(TokenKind::Err),
             "catch" => Some(TokenKind::Catch),
             _ => None,

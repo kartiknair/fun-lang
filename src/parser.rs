@@ -301,6 +301,26 @@ impl<'a> Parser<'a> {
                     span: token.span.clone(),
                 });
             }
+            TokenKind::For => {
+                self.current += 1;
+
+                let ident = self
+                    .expect(TokenKind::Ident, "expect element name")?
+                    .clone();
+                self.expect(TokenKind::In, "expect `in` after element in loop")?;
+                let iterable = self.parse_expr()?;
+                let block = self.parse_block()?;
+
+                expr = Some(ast::Expr {
+                    kind: ast::ForStmt {
+                        ident,
+                        iterable: Box::new(iterable),
+                        block,
+                    }
+                    .into(),
+                    span: token.span.clone(),
+                });
+            }
             TokenKind::Return => {
                 self.current += 1;
 

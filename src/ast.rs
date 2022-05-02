@@ -29,6 +29,13 @@ pub struct WhileStmt {
 }
 
 #[derive(Debug, Clone)]
+pub struct ForStmt {
+    pub ident: token::Token,
+    pub iterable: Box<Expr>,
+    pub block: Block,
+}
+
+#[derive(Debug, Clone)]
 pub struct ReturnStmt {
     pub value: Box<Expr>,
     pub err: bool,
@@ -95,6 +102,7 @@ pub enum ExprKind {
     // Statements that evaluate to null
     FunLit(FunLit),
     VarDecl(VarDecl),
+    ForStmt(ForStmt),
     WhileStmt(WhileStmt),
     ReturnStmt(ReturnStmt),
 

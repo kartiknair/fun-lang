@@ -9,11 +9,15 @@ mod token;
 
 fn main() -> Result<(), common::Error> {
     let demo_src = r#"
-        obj := {"foo bar": "bruh"}
-        print(obj)
-
-        obj["foo"] = "yo"
-        print(obj)
+        foo := "नमस्ते"
+        obj := {x: 24, y: 32}
+        for c in enumerate(foo) {
+            print(c)
+        }
+        for el in obj {
+            print(el)
+        }
+        print(type(obj))
     "#;
 
     let mut file = ast::File {
